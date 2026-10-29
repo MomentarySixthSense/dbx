@@ -2721,7 +2721,10 @@ pub fn prepare_sql_file_statement(
         if is_mysql_compatible_target && is_mysql_session_restore_statement(statement) {
             return SqlFileStatementAction::Skip;
         }
-        return SqlFileStatementAction::Execute(statement.to_string());
+        return SqlFileStatementAction::Execute(normalize_mysql_sql_file_charset(
+            statement,
+            is_mysql_compatible_target,
+        ));
     };
 
     if !is_mysql_compatible_target {
@@ -2733,7 +2736,38 @@ pub fn prepare_sql_file_statement(
         return SqlFileStatementAction::Skip;
     }
 
-    SqlFileStatementAction::Execute(body.to_string())
+    SqlFileStatementAction::Execute(normalize_mysql_sql_file_charset(body, true))
+}
+
+/// SQL files are decoded as UTF-8 before being sent to MySQL.  MySQL's
+/// historical `utf8`/`utf8mb3` connection character set cannot represent
+/// supplementary Unicode characters, so a dump containing that directive
+/// would turn emoji into `?` (or fail in strict mode).  Keep the directive's
+/// session-setting role while upgrading only this incompatible alias.
+fn normalize_mysql_sql_file_charset(statement: &str, mysql_target: bool) -> String {
+    if !mysql_target {
+        return statement.to_string();
+    }
+    let spans = statement
+        .split_whitespace()
+        .scan(0usize, |offset, token| {
+            let start = statement[*offset..].find(token)? + *offset;
+            *offset = start + token.len();
+            Some((start, token))
+        })
+        .collect::<Vec<_>>();
+    if spans.len() < 3 || !spans[0].1.eq_ignore_ascii_case("SET") || !spans[1].1.eq_ignore_ascii_case("NAMES") {
+        return statement.to_string();
+    }
+    let charset = if spans[2].1 == "=" { spans.get(3) } else { spans.get(2) };
+    let Some((start, token)) = charset else { return statement.to_string() };
+    let charset_name = token.trim_end_matches(';');
+    if !charset_name.eq_ignore_ascii_case("utf8") && !charset_name.eq_ignore_ascii_case("utf8mb3") {
+        return statement.to_string();
+    }
+    let mut normalized = statement.to_string();
+    normalized.replace_range(*start..*start + charset_name.len(), "utf8mb4");
+    normalized
 }
 
 fn strip_postgres_pg_dump_guard_command(statement: &str) -> Option<String> {
@@ -5475,6 +5509,34 @@ mod tests {
         assert_eq!(
             prepare_sql_file_statement("/*!40101 SET NAMES utf8mb4 */", &DatabaseType::Mysql, None),
             SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
+        );
+    }
+
+    #[test]
+    fn upgrades_only_mysql_utf8_set_names_for_sql_file_imports() {
+        assert_eq!(
+            prepare_sql_file_statement("SET NAMES utf8;", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("SET NAMES utf8mb4;".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("SET NAMES utf8mb3", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("SET NAMES utf8mb4", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("SET NAMES utf8", &DatabaseType::Postgres, None),
+            SqlFileStatementAction::Execute("SET NAMES utf8".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("/*!40101 SET NAMES utf8 */", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("SELECT 'SET NAMES utf8'", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("SELECT 'SET NAMES utf8'".to_string())
         );
     }
 
