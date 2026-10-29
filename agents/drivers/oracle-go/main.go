@@ -44,7 +44,7 @@ const oracleDatabaseVersionProbeTimeout = 3 * time.Second
 const oracleDatabaseVersionSQL = `
 SELECT VERSION
 FROM PRODUCT_COMPONENT_VERSION
-WHERE PRODUCT LIKE 'Oracle Database%'
+WHERE PRODUCT LIKE 'Oracle%Database%'
   AND ROWNUM = 1`
 
 const oracleDisableSegmentAttributesSQL = `BEGIN DBMS_METADATA.SET_TRANSFORM_PARAM(DBMS_METADATA.SESSION_TRANSFORM, 'SEGMENT_ATTRIBUTES', FALSE); END;`
@@ -59,7 +59,7 @@ var (
 	oracleNotNullConstraintRegexp        = regexp.MustCompile(`(?i)^\s*\(*\s*(?:"((?:[^"]|"")*)"|([A-Z0-9_$#]+))\s+IS\s+NOT\s+NULL\s*\)*\s*$`)
 	oracleDatabaseVersionQueries         = []string{
 		oracleDatabaseVersionSQL,
-		`SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle Database%' AND ROWNUM = 1`,
+		`SELECT BANNER FROM V$VERSION WHERE BANNER LIKE 'Oracle%Database%' AND ROWNUM = 1`,
 	}
 	oracleStringConverters = map[int]converters.IStringConverter{
 		oracleCharsetZHS32GB18030: oracleGB18030Converter{},
@@ -1132,6 +1132,9 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 			return nil, false, errors.New("not connected")
 		}
 		return map[string]bool{"ok": true}, false, pingDB(s.db, 5*time.Second)
+	case "connection_info":
+		result, err := s.connectionInfo()
+		return result, false, err
 	case "list_databases":
 		result, err := s.listDatabases()
 		return result, false, err
@@ -1380,6 +1383,9 @@ func oracleServerMajorVersionFromDriverConn(driverConn any) (int, bool) {
 	if guarded, ok := driverConn.(*oracleQueryConnection); ok {
 		driverConn = guarded.oracleThinConnection
 	}
+	if legacy, ok := driverConn.(*oracleLegacyConnection); ok {
+		driverConn = legacy.oracleThinConnection
+	}
 	conn, ok := driverConn.(*go_ora.Connection)
 	if !ok {
 		return 0, false
@@ -1587,19 +1593,15 @@ func openDB(params connectParams) (*sql.DB, error) {
 
 func openDBWithStringConverter(params connectParams, stringConverter converters.IStringConverter) (*sql.DB, error) {
 	if usesOCIProfile(params) {
-		// OCI 由 Oracle 客户端负责字符集转换（NLS_LANG 在进程环境里生效），
-		// go-ora 的 string converter 机制不适用于它。
+		// godror uses UTF-8 explicitly; NLS_LANG does not override its data
+		// encoding. Legacy US7ASCII byte interpretation belongs to Thin.
 		return openOCIDB(params)
 	}
-	dsn, err := buildDSNForConnect(params)
+	connector, err := newOracleThinConnector(params, stringConverter)
 	if err != nil {
 		return nil, err
 	}
-	connector := go_ora.NewConnector(dsn)
-	if stringConverter != nil {
-		go_ora.SetStringConverter(connector, stringConverter, nil)
-	}
-	db := sql.OpenDB(oracleQueryConnector{connector})
+	db := sql.OpenDB(connector)
 	db.SetMaxOpenConns(4)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(30 * time.Minute)
