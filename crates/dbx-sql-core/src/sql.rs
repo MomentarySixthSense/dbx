@@ -2778,6 +2778,17 @@ fn normalize_mysql_sql_file_charset(statement: &str) -> String {
     if !name.eq_ignore_ascii_case("utf8") && !name.eq_ignore_ascii_case("utf8mb3") {
         return statement.to_string();
     }
+    // An explicit `COLLATE` clause may name a collation that is not valid for
+    // utf8mb4 (for example `utf8_general_ci`); rewriting only the charset name
+    // would leave the statement failing with ERROR 1273, which is worse than
+    // the legacy charset it started with. Keep such statements verbatim.
+    let mut after_name = index;
+    while bytes.get(after_name).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        after_name += 1;
+    }
+    if bytes.len() >= after_name + 7 && bytes[after_name..after_name + 7].eq_ignore_ascii_case(b"COLLATE") {
+        return statement.to_string();
+    }
 
     let mut normalized = String::with_capacity(statement.len() + 2);
     normalized.push_str(&statement[..prefix_len + charset_start]);
@@ -5557,6 +5568,22 @@ mod tests {
             prepare_sql_file_statement("SET NAMES utf8", &DatabaseType::Postgres, None),
             SqlFileStatementAction::Execute("SET NAMES utf8".to_string())
         );
+    }
+
+    #[test]
+    fn keeps_collated_legacy_utf8_set_names_verbatim() {
+        // `utf8_general_ci` is not a valid collation for utf8mb4; rewriting the
+        // charset alone would turn the statement into ERROR 1273.
+        for source in [
+            "SET NAMES utf8 COLLATE utf8_general_ci",
+            "set names utf8mb3   collate utf8mb3_bin;",
+            "-- dump session\nSET NAMES utf8 COLLATE utf8_unicode_ci",
+        ] {
+            assert_eq!(
+                prepare_sql_file_statement(source, &DatabaseType::Mysql, None),
+                SqlFileStatementAction::Execute(source.to_string())
+            );
+        }
     }
 
     #[test]
