@@ -2721,10 +2721,11 @@ pub fn prepare_sql_file_statement(
         if is_mysql_compatible_target && is_mysql_session_restore_statement(statement) {
             return SqlFileStatementAction::Skip;
         }
-        return SqlFileStatementAction::Execute(normalize_mysql_sql_file_charset(
-            statement,
-            is_mysql_compatible_target,
-        ));
+        return SqlFileStatementAction::Execute(if is_mysql_compatible_target {
+            normalize_mysql_sql_file_charset(statement)
+        } else {
+            statement.to_string()
+        });
     };
 
     if !is_mysql_compatible_target {
@@ -2736,37 +2737,52 @@ pub fn prepare_sql_file_statement(
         return SqlFileStatementAction::Skip;
     }
 
-    SqlFileStatementAction::Execute(normalize_mysql_sql_file_charset(body, true))
+    SqlFileStatementAction::Execute(normalize_mysql_sql_file_charset(body))
 }
 
-/// SQL files are decoded as UTF-8 before being sent to MySQL.  MySQL's
-/// historical `utf8`/`utf8mb3` connection character set cannot represent
-/// supplementary Unicode characters, so a dump containing that directive
-/// would turn emoji into `?` (or fail in strict mode).  Keep the directive's
-/// session-setting role while upgrading only this incompatible alias.
-fn normalize_mysql_sql_file_charset(statement: &str, mysql_target: bool) -> String {
-    if !mysql_target {
+/// MySQL's `utf8` charset is the legacy 3-byte `utf8mb3` charset.  SQL files
+/// are decoded as Unicode before they reach the driver, so executing a file
+/// that changes the connection to `utf8` makes otherwise valid 4-byte text
+/// (for example emoji) fail or be replaced on MySQL 5.7.  Keep the session
+/// charset semantics for other explicit choices, but use the Unicode-capable
+/// spelling for this legacy alias during SQL-file imports.
+fn normalize_mysql_sql_file_charset(statement: &str) -> String {
+    let executable = leading_executable_sql_with_options(statement, SqlParsingOptions::mysql_compatible());
+    let prefix_len = statement.len() - executable.len();
+    let bytes = executable.as_bytes();
+    if bytes.len() < 3 || !bytes[..3].eq_ignore_ascii_case(b"SET") {
         return statement.to_string();
     }
-    let spans = statement
-        .split_whitespace()
-        .scan(0usize, |offset, token| {
-            let start = statement[*offset..].find(token)? + *offset;
-            *offset = start + token.len();
-            Some((start, token))
-        })
-        .collect::<Vec<_>>();
-    if spans.len() < 3 || !spans[0].1.eq_ignore_ascii_case("SET") || !spans[1].1.eq_ignore_ascii_case("NAMES") {
+    let mut index = 3;
+    if bytes.get(index).is_none_or(|byte| !byte.is_ascii_whitespace()) {
         return statement.to_string();
     }
-    let charset = if spans[2].1 == "=" { spans.get(3) } else { spans.get(2) };
-    let Some((start, token)) = charset else { return statement.to_string() };
-    let charset_name = token.trim_end_matches(';');
-    if !charset_name.eq_ignore_ascii_case("utf8") && !charset_name.eq_ignore_ascii_case("utf8mb3") {
+    while bytes.get(index).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        index += 1;
+    }
+    if bytes.len() < index + 5 || !bytes[index..index + 5].eq_ignore_ascii_case(b"NAMES") {
         return statement.to_string();
     }
-    let mut normalized = statement.to_string();
-    normalized.replace_range(*start..*start + charset_name.len(), "utf8mb4");
+    index += 5;
+    if bytes.get(index).is_none_or(|byte| !byte.is_ascii_whitespace()) {
+        return statement.to_string();
+    }
+    while bytes.get(index).is_some_and(|byte| byte.is_ascii_whitespace()) {
+        index += 1;
+    }
+    let charset_start = index;
+    while bytes.get(index).is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b';') {
+        index += 1;
+    }
+    let name = &executable[charset_start..index];
+    if !name.eq_ignore_ascii_case("utf8") && !name.eq_ignore_ascii_case("utf8mb3") {
+        return statement.to_string();
+    }
+
+    let mut normalized = String::with_capacity(statement.len() + 2);
+    normalized.push_str(&statement[..prefix_len + charset_start]);
+    normalized.push_str("utf8mb4");
+    normalized.push_str(&statement[prefix_len + index..]);
     normalized
 }
 
@@ -5513,30 +5529,41 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_only_mysql_utf8_set_names_for_sql_file_imports() {
-        assert_eq!(
-            prepare_sql_file_statement("SET NAMES utf8;", &DatabaseType::Mysql, None),
-            SqlFileStatementAction::Execute("SET NAMES utf8mb4;".to_string())
-        );
-        assert_eq!(
-            prepare_sql_file_statement("SET NAMES utf8mb3", &DatabaseType::Mysql, None),
-            SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
-        );
+    fn normalizes_mysql_legacy_utf8_for_sql_file_imports() {
+        for (source, expected) in [
+            ("SET NAMES utf8", "SET NAMES utf8mb4"),
+            ("set names utf8mb3", "set names utf8mb4"),
+            ("  SET  NAMES  UTF8;", "SET  NAMES  utf8mb4;"),
+            ("-- dump session\nSET NAMES utf8", "-- dump session\nSET NAMES utf8mb4"),
+        ] {
+            assert_eq!(
+                prepare_sql_file_statement(source, &DatabaseType::Mysql, None),
+                SqlFileStatementAction::Execute(expected.to_string())
+            );
+        }
         assert_eq!(
             prepare_sql_file_statement("SET NAMES utf8mb4", &DatabaseType::Mysql, None),
             SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
         );
         assert_eq!(
+            prepare_sql_file_statement("SET NAMES latin1", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("SET NAMES latin1".to_string())
+        );
+        assert_eq!(
+            prepare_sql_file_statement("INSERT INTO t VALUES ('中文 😀')", &DatabaseType::Mysql, None),
+            SqlFileStatementAction::Execute("INSERT INTO t VALUES ('中文 😀')".to_string())
+        );
+        assert_eq!(
             prepare_sql_file_statement("SET NAMES utf8", &DatabaseType::Postgres, None),
             SqlFileStatementAction::Execute("SET NAMES utf8".to_string())
         );
+    }
+
+    #[test]
+    fn normalizes_utf8_in_mysql_executable_comments() {
         assert_eq!(
             prepare_sql_file_statement("/*!40101 SET NAMES utf8 */", &DatabaseType::Mysql, None),
             SqlFileStatementAction::Execute("SET NAMES utf8mb4".to_string())
-        );
-        assert_eq!(
-            prepare_sql_file_statement("SELECT 'SET NAMES utf8'", &DatabaseType::Mysql, None),
-            SqlFileStatementAction::Execute("SELECT 'SET NAMES utf8'".to_string())
         );
     }
 
