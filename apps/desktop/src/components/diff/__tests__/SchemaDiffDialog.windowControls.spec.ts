@@ -27,12 +27,12 @@ const calls = vi.hoisted(() => ({
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/i18n", () => ({ default: { global: { t: (key: string) => key } } }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
-vi.mock("@/lib/backend/platform", () => ({ isMacOS: () => false }));
-vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
-vi.mock("@/composables/useWindowControls", () => ({
-  minimizeCurrentWindow: calls.minimize,
-  shouldShowWindowControls: (isMac: boolean, isDesktop: boolean) => isDesktop && !isMac,
-}));
+// Only the runtime/platform predicates are substituted, so the dialog still runs the
+// production `shouldShowWindowControls` and the real minimize binding.
+const platform = vi.hoisted(() => ({ isMac: false, isDesktop: true }));
+vi.mock("@/lib/backend/platform", () => ({ isMacOS: () => platform.isMac }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => platform.isDesktop }));
+vi.mock("@/composables/useWindowControls", async (importOriginal) => ({ ...(await importOriginal<object>()), minimizeCurrentWindow: calls.minimize }));
 vi.mock("@/composables/useDialogSources", () => ({ openSchemaDiffSession: vi.fn() }));
 vi.mock("@/composables/useExportTracker", () => ({ useExportTracker: () => ({ addSchemaDiffTask: vi.fn(), updateCompareTask: vi.fn() }) }));
 vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({ requestConfirmation: calls.confirm }) }));
@@ -129,6 +129,7 @@ const sourceFunction = { name: "F", function_type: "FUNCTION", definition: sourc
 
 beforeEach(() => {
   vi.clearAllMocks();
+  Object.assign(platform, { isMac: false, isDesktop: true });
   records.clear();
   calls.databaseType = "oceanbase-oracle";
   calls.sourceDatabaseType = "";
@@ -236,5 +237,14 @@ describe("schema diff window controls", () => {
     expect(minimize).not.toBeNull();
     minimize!.click();
     expect(calls.minimize).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["macOS", { isMac: true, isDesktop: true }],
+    ["the web build", { isMac: false, isDesktop: false }],
+  ])("hides the minimize control on %s, where the window chrome is not drawn by the app", async (_runtime, flags) => {
+    Object.assign(platform, flags);
+    await mountComparison();
+    expect(document.querySelector('button[aria-label="tabs.minimizeWindow"]')).toBeNull();
   });
 });
