@@ -1,7 +1,14 @@
-import { describe, expect, it } from "vitest";
-import { appShellMinSizeStyleForScale, macTrafficLightInsetPaddingForScale, macTrafficLightPositionForScale, shouldDrawDesktopWindowFrame, shouldDrawLinuxFloatingFrame, shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
+import { describe, expect, it, vi } from "vitest";
+import { appShellMinSizeStyleForScale, macTrafficLightInsetPaddingForScale, macTrafficLightPositionForScale, minimizeCurrentWindow, shouldDrawDesktopWindowFrame, shouldDrawLinuxFloatingFrame, shouldReserveMacTrafficLightInset, shouldShowWindowControls } from "@/composables/useWindowControls";
+
+const windowApi = vi.hoisted(() => ({ minimize: vi.fn(), getCurrentWindow: vi.fn(() => ({ minimize: windowApi.minimize })) }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: windowApi.getCurrentWindow }));
 
 describe("window controls", () => {
+  it("minimizes the current native window", async () => {
+    await minimizeCurrentWindow();
+    expect(windowApi.minimize).toHaveBeenCalledOnce();
+  });
   it("shows custom controls for non-macOS desktop windows", () => {
     expect(shouldShowWindowControls(false, true)).toBe(true);
   });

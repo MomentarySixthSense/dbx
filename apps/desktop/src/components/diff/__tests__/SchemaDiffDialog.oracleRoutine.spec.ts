@@ -19,6 +19,7 @@ const calls = vi.hoisted(() => ({
   loadDdl: vi.fn(),
   transaction: vi.fn(),
   multi: vi.fn(),
+  minimize: vi.fn(),
   databaseType: "oceanbase-oracle",
   sourceDatabaseType: "",
   targetConfig: { host: "localhost", is_production: true },
@@ -27,6 +28,7 @@ const calls = vi.hoisted(() => ({
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/i18n", () => ({ default: { global: { t: (key: string) => key } } }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+vi.mock("@/composables/useWindowControls", () => ({ minimizeCurrentWindow: calls.minimize }));
 vi.mock("@/composables/useDialogSources", () => ({ openSchemaDiffSession: vi.fn() }));
 vi.mock("@/composables/useExportTracker", () => ({ useExportTracker: () => ({ addSchemaDiffTask: vi.fn(), updateCompareTask: vi.fn() }) }));
 vi.mock("@/stores/productionSafetyStore", () => ({ useProductionSafetyStore: () => ({ requestConfirmation: calls.confirm }) }));
@@ -306,6 +308,14 @@ it("does not persist a hidden dialog's zero-sized resize observation", async () 
   } finally {
     vi.unstubAllGlobals();
   }
+});
+
+it("keeps a native minimize action available while the schema diff dialog is open", async () => {
+  await mountComparison();
+  const minimize = document.querySelector<HTMLButtonElement>('button[aria-label="tabs.minimizeWindow"]');
+  expect(minimize).not.toBeNull();
+  minimize!.click();
+  expect(calls.minimize).toHaveBeenCalledOnce();
 });
 
 it("applies the storage preference to Oracle comparison deployment SQL (#13224)", async () => {

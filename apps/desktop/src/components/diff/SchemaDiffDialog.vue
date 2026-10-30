@@ -9,7 +9,7 @@ import { applyDdlTextPreferences } from "@/lib/sql/ddlPreferences";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import { loadObjectDdl } from "@/lib/metadata/objectDdlCache";
 import { useToast } from "@/composables/useToast";
-import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, AlertTriangle, CircleCheck, ChevronDown, ChevronRight } from "@lucide/vue";
+import { GitCompareArrows, ArrowLeft, Play, Loader2, Maximize2, Minimize2, Minus, AlertTriangle, CircleCheck, ChevronDown, ChevronRight } from "@lucide/vue";
 import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
@@ -89,6 +89,7 @@ import {
 import { swapSchemaDiffTableMappings } from "@/lib/schema/schemaDiffTableMapping";
 import { Splitpanes, Pane } from "splitpanes";
 import "splitpanes/dist/splitpanes.css";
+import { minimizeCurrentWindow } from "@/composables/useWindowControls";
 
 type SchemaDiffResultTab = "tables" | "routines";
 
@@ -1679,6 +1680,9 @@ const targetConnectionInfo = computed(() => {
         <Maximize2 v-if="!isMaximized" class="w-4 h-4" />
         <Minimize2 v-else class="w-4 h-4" />
         <span class="sr-only">{{ isMaximized ? t("diff.restore") : t("diff.maximize") }}</span>
+      </Button>
+      <Button variant="ghost" size="icon-sm" class="absolute top-2 right-18 z-10" :aria-label="t('tabs.minimizeWindow')" :title="t('tabs.minimizeWindow')" @click="minimizeCurrentWindow">
+        <Minus class="w-4 h-4" />
       </Button>
 
       <DialogHeader>
